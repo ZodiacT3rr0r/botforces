@@ -1,36 +1,81 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# BotForces
 
-## Getting Started
+BotForces is an advanced, AI-powered competitive programming analysis platform. It integrates directly with the Codeforces API to synchronize user submissions and leverages Google Gemini to provide intelligent, contextual feedback on failed attempts. The platform is designed to act as an automated competitive programming coach, identifying conceptual mistakes, analyzing time/space complexities, and providing tailored study recommendations.
 
-First, run the development server:
+## Core Features
+
+*   **Automated Submission Synchronization:** Connects with the Codeforces API to securely fetch user profiles and recent submission histories.
+*   **AI Code Analysis:** Utilizes Google Gemini to analyze failed submissions (e.g., Wrong Answer, Time Limit Exceeded) against problem constraints and provides actionable feedback.
+*   **Intelligent Insights:** Correlates problem tags with algorithms and data structures to deliver specific topic recommendations for improvement.
+*   **Browser Extension Integration:** Includes a companion browser extension to allow for direct submission from the BotForces integrated code editor to Codeforces.
+*   **Integrated Code Editor:** A full Monaco-based code environment supporting multiple languages.
+
+## Technical Architecture
+
+*   **Framework:** Next.js (App Router)
+*   **Language:** TypeScript
+*   **Database:** MongoDB via Mongoose
+*   **Styling:** Tailwind CSS
+*   **AI Integration:** Google GenAI SDK (Gemini)
+
+## Setup and Testing Instructions
+
+To run this project locally, you will need Node.js installed on your machine, a MongoDB database, and a Google Gemini API key.
+
+### 1. Repository Configuration
+
+Clone the repository and install the dependencies:
+
+```bash
+npm install
+```
+
+### 2. Environment Variables
+
+Create a file named `.env.local` in the root of the project. This file is required to connect to your database and the Gemini API.
+
+```env
+MONGODB_URI=your_mongodb_connection_string
+GEMINI_API_KEY=your_gemini_api_key
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+### 3. Database Setup (MongoDB Atlas)
+
+To configure the MongoDB connection:
+
+1.  Create an account or log in to MongoDB Atlas.
+2.  Create a new project and deploy a free cluster.
+3.  Under "Database Access", create a new database user and securely store the password.
+4.  Under "Network Access", add your current IP address to the whitelist to allow connections.
+5.  Click "Connect", select "Drivers", and copy the provided connection string. Replace `<password>` with your database user's password.
+6.  Paste this string as the `MONGODB_URI` in your `.env.local` file.
+
+### 4. API Setup (Google Gemini)
+
+To configure the AI analysis:
+
+1.  Navigate to Google AI Studio.
+2.  Generate a new API key.
+3.  Paste this key as the `GEMINI_API_KEY` in your `.env.local` file.
+4.  If the key is left as `gemini-placeholder-key`, the application will default to a local stubbing mechanism for development purposes.
+
+### 5. Running the Development Server
+
+Start the application:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000` in your browser. Enter any valid Codeforces handle to view the dashboard and trigger the initial synchronization pipeline.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 6. Installing the Browser Extension
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+To enable integrated submissions:
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1.  Open Google Chrome and navigate to `chrome://extensions/`.
+2.  Enable "Developer mode" in the top right corner.
+3.  Click "Load unpacked".
+4.  Select the `extension` directory located within this project.
+5.  Ensure you are logged into Codeforces in your browser to authenticate submissions.
