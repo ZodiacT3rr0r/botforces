@@ -81,7 +81,7 @@ export default function InsightCard({ insights }: InsightCardProps) {
               >
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              GPT-4 Analysis
+              Gemini Analysis
             </div>
           </div>
 

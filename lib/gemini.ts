@@ -1,17 +1,15 @@
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // Check if we have a real API key or just the placeholder
 const isStubbed =
-  !OPENAI_API_KEY ||
-  OPENAI_API_KEY === "sk-placeholder-key" ||
-  OPENAI_API_KEY.startsWith("sk-placeholder");
+  !GEMINI_API_KEY ||
+  GEMINI_API_KEY === "gemini-placeholder-key" ||
+  GEMINI_API_KEY.startsWith("gemini-placeholder");
 
 // Only initialize the client if we have a real key
-const openai = isStubbed
-  ? null
-  : new OpenAI({ apiKey: OPENAI_API_KEY });
+const ai = isStubbed ? null : new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 export interface AnalysisResult {
   performanceReport: string;
@@ -19,7 +17,7 @@ export interface AnalysisResult {
 }
 
 /**
- * Analyze a failed Codeforces submission using GPT-4.
+ * Analyze a failed Codeforces submission using Gemini.
  *
  * Acts as a competitive programming coach: identifies conceptual mistakes,
  * explains why the solution failed, and recommends topics to practice.
@@ -64,32 +62,30 @@ ${code.slice(0, 8000)}
 Analyze this failed submission and provide your coaching feedback as JSON.`;
 
   try {
-    const response = await openai!.chat.completions.create({
-      model: "gpt-4",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.3,
-      max_tokens: 2000,
-      response_format: { type: "json_object" },
+    const response = await ai!.models.generateContent({
+      model: "gemini-3.6-flash",
+      contents: userPrompt,
+      config: {
+        systemInstruction: systemPrompt,
+        responseMimeType: "application/json",
+      },
     });
 
-    const content = response.choices[0]?.message?.content;
+    const content = response.text;
     if (!content) {
-      throw new Error("Empty response from GPT-4");
+      throw new Error("Empty response from Gemini");
     }
 
     const parsed = JSON.parse(content) as AnalysisResult;
 
     // Validate the response shape
     if (!parsed.performanceReport || !Array.isArray(parsed.recommendedTopics)) {
-      throw new Error("Invalid response shape from GPT-4");
+      throw new Error("Invalid response shape from Gemini");
     }
 
     return parsed;
   } catch (error) {
-    console.error("OpenAI API error:", error);
+    console.error("Gemini API error:", error);
     // Fall back to stub on error
     return generateStubResponse(tags, verdict, problemName);
   }
@@ -167,7 +163,7 @@ Based on the problem tags [${tags.join(", ")}], this problem likely requires a s
 
 Consider writing additional test cases, especially boundary cases (minimum/maximum values, empty inputs, single elements). This is a common technique used by top competitive programmers to catch subtle bugs before submission.
 
-*[This is a placeholder analysis. Connect your OpenAI API key for real GPT-4 analysis.]*`;
+*[This is a placeholder analysis. Connect your Gemini API key for real Gemini analysis.]*`;
 
   // Build recommended topics based on tags
   const recommended: string[] = [];

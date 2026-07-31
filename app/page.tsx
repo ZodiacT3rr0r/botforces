@@ -91,9 +91,8 @@ export default function Home() {
           className="animate-fade-in-up text-text-secondary text-lg md:text-xl text-center max-w-2xl mt-6 leading-relaxed"
           style={{ animationDelay: "0.2s" }}
         >
-          Analyze your Codeforces performance with GPT-4. Get personalized
-          insights, identify weaknesses, and level up your competitive
-          programming skills.
+          Analyze your Codeforces performance with Gemini. Get personalized
+          insights on failed submissions and actionable practice recommendations.
         </p>
 
         {/* Handle Input */}
@@ -189,8 +188,8 @@ export default function Home() {
               icon: (
                 <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
               ),
-              title: "AI Code Review",
-              desc: "GPT-4 analyzes your failed submissions and explains mistakes",
+              title: "AI Code Analysis",
+              desc: "Gemini analyzes your failed submissions and explains mistakes",
             },
             {
               icon: (
@@ -227,7 +226,7 @@ export default function Home() {
 
       {/* ─── Footer ──────────────────────────────────────────────────── */}
       <footer className="text-center py-6 text-text-muted text-xs">
-        Built for competitive programmers · Powered by Codeforces API & GPT-4
+        Built for competitive programmers · Powered by Codeforces API & Gemini
       </footer>
     </div>
   );

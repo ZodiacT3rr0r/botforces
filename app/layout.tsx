@@ -22,7 +22,7 @@ export const metadata: Metadata = {
     "Codeforces",
     "competitive programming",
     "AI analysis",
-    "GPT-4",
+    "Gemini",
     "algorithm practice",
   ],
 };

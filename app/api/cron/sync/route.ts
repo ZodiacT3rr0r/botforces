@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import connectDB from "@/lib/mongodb";
 import { getUserInfo, getUserSubmissions } from "@/lib/codeforces";
 import { scrapeSourceCode } from "@/lib/scraper";
-import { analyzeFailedSubmission } from "@/lib/openai";
+import { analyzeFailedSubmission } from "@/lib/gemini";
 import User from "@/models/User";
 import Submission from "@/models/Submission";
 import Insight from "@/models/Insight";
@@ -15,7 +15,7 @@ import Insight from "@/models/Insight";
  * 2. Fetch recent submissions → upsert Submission documents
  * 3. Filter for failed submissions (WA / TLE) not yet analyzed
  * 4. Scrape source code for each failed submission
- * 5. Run GPT-4 analysis on each
+ * 5. Run Gemini analysis on each
  * 6. Save Insight documents
  */
 export async function GET(request: NextRequest) {
@@ -131,7 +131,7 @@ export async function GET(request: NextRequest) {
         }
       }
 
-      // Run GPT-4 analysis (even if source code is missing, we can provide general feedback)
+      // Run Gemini analysis (even if source code is missing, we can provide general feedback)
       const analysis = await analyzeFailedSubmission(
         sourceCode || "// Source code could not be scraped due to Codeforces Cloudflare protection.",
         sub.tags,
