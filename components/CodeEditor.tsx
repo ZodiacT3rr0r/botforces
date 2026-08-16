@@ -156,6 +156,10 @@ export default function CodeEditor({
 
   const handleSubmit = async () => {
     if (!code.trim()) return;
+    if (!contestId || !problemIndex) {
+      setSubmitStatus("No contest/problem selected. Open a problem first.");
+      return;
+    }
 
     setSubmitting(true);
     setSubmitStatus(null);
@@ -163,46 +167,46 @@ export default function CodeEditor({
     try {
       if (onSubmit) {
         onSubmit(code, language);
-        setSubmitStatus("Submission sent to extension!");
+        setSubmitStatus("Submission sent!");
         return;
       }
 
-      // Try to communicate with the extension
-      if (typeof window !== "undefined" && contestId && problemIndex) {
-        // Try external messaging via chrome.runtime
-        const extensionId = localStorage.getItem("botforces_extension_id");
+      // Read handle from URL search params
+      const handle =
+        typeof window !== "undefined"
+          ? new URLSearchParams(window.location.search).get("handle") || "unknown"
+          : "unknown";
 
-        if (extensionId) {
-          // @ts-expect-error - chrome.runtime only available when extension is installed
-          chrome.runtime.sendMessage(
-            extensionId,
-            {
-              type: "SUBMIT",
-              data: {
-                contestId,
-                problemIndex,
-                code,
-                language: LANGUAGE_OPTIONS.find((l) => l.value === language)?.label || language,
-              },
-            },
-            (response: { success?: boolean; error?: string }) => {
-              if (response?.success) {
-                setSubmitStatus("✅ Submitted via extension!");
-              } else {
-                setSubmitStatus(`❌ ${response?.error || "Extension error"}`);
-              }
-            }
-          );
-        } else {
-          setSubmitStatus(
-            "⚠️ Extension not configured. Load the BotForces extension and set its ID."
-          );
-        }
+      const res = await fetch("/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          handle,
+          contestId,
+          problemIndex,
+          problemName,
+          language,
+          sourceCode: code,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        setSubmitStatus(`Error: ${data.error || "Submission failed"}`);
       } else {
-        setSubmitStatus("⚠️ No contest/problem selected for submission.");
+        const v = data.verdict || "TESTING";
+        const verdictLabel =
+          v === "OK" ? "Accepted" :
+          v === "WRONG_ANSWER" ? "Wrong Answer" :
+          v === "TIME_LIMIT_EXCEEDED" ? "Time Limit Exceeded" :
+          v === "RUNTIME_ERROR" ? "Runtime Error" :
+          v === "COMPILATION_ERROR" ? "Compilation Error" :
+          v;
+        setSubmitStatus(`${verdictLabel} — Submission #${data.submissionId}`);
       }
     } catch (error) {
-      setSubmitStatus(`❌ ${error instanceof Error ? error.message : "Submit failed"}`);
+      setSubmitStatus(`Error: ${error instanceof Error ? error.message : "Submit failed"}`);
     } finally {
       setSubmitting(false);
     }

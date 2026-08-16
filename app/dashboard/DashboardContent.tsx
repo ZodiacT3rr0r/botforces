@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import ProfileHeader from "@/components/ProfileHeader";
 import SubmissionList from "@/components/SubmissionList";
 import InsightCard from "@/components/InsightCard";
-import ExtensionStatus from "@/components/ExtensionStatus";
+import CftoolStatus from "@/components/CftoolStatus";
 import { IUser } from "@/models/User";
 import { ISubmission } from "@/models/Submission";
 import { IInsight } from "@/models/Insight";
@@ -112,7 +112,7 @@ export default function DashboardContent() {
         </div>
 
         <div className="flex items-center gap-3">
-          <ExtensionStatus />
+          <CftoolStatus />
 
           {/* Sync indicator */}
           {syncStatus === "syncing" && (
