@@ -1,14 +1,22 @@
-# BotForces
+# BotForces — cf-tool Integration Branch
 
-BotForces is an advanced, AI-powered competitive programming analysis platform. It integrates directly with the Codeforces API to synchronize user submissions and leverages Google Gemini to provide intelligent, contextual feedback on failed attempts. The platform is designed to act as an automated competitive programming coach, identifying conceptual mistakes, analyzing time/space complexities, and providing tailored study recommendations.
+This branch replaces the browser extension with a server-side submission pipeline powered by the `cf-tool` CLI binary. Code is submitted directly to Codeforces from the Next.js backend, with no browser extension required.
+
+For the production-ready, extension-based version see the `main` branch.
 
 ## Core Features
 
-*   **Automated Submission Synchronization:** Connects with the Codeforces API to securely fetch user profiles and recent submission histories.
-*   **AI Code Analysis:** Utilizes Google Gemini to analyze failed submissions (e.g., Wrong Answer, Time Limit Exceeded) against problem constraints and provides actionable feedback.
-*   **Intelligent Insights:** Correlates problem tags with algorithms and data structures to deliver specific topic recommendations for improvement.
-*   **Browser Extension Integration:** Includes a companion browser extension to allow for direct submission from the BotForces integrated code editor to Codeforces.
-*   **Integrated Code Editor:** A full Monaco-based code environment supporting multiple languages.
+*   **Automated Submission Synchronization:** Connects with the Codeforces API to fetch user profiles and recent submission histories.
+*   **Server-side Code Submission:** Submits code to Codeforces via the `cf-tool` CLI binary running on the backend. No browser extension required.
+*   **AI Code Analysis:** Utilizes Google Gemini to analyze failed submissions and provide contextual coaching feedback.
+*   **Intelligent Insights:** Correlates problem tags with algorithms and data structures to deliver specific study recommendations.
+*   **Integrated Code Editor:** A full Monaco-based code editor supporting C++, Python, Java, JavaScript, Kotlin, Rust, Go, and C.
+
+## How Submission Works
+
+1.  You log in to Codeforces once via the dashboard login card. This drives the local `cf-tool` binary to authenticate and store a session in `~/.cf/`.
+2.  When you click Submit in the editor, the backend writes your code to a temporary file and spawns `cf submit`, parsing the real-time stdout for the verdict.
+3.  The result is saved to your MongoDB database and displayed inline in the editor.
 
 ## Technical Architecture
 
@@ -17,22 +25,22 @@ BotForces is an advanced, AI-powered competitive programming analysis platform. 
 *   **Database:** MongoDB via Mongoose
 *   **Styling:** Tailwind CSS
 *   **AI Integration:** Google GenAI SDK (Gemini)
+*   **Submission:** xalanq/cf-tool v1.0.0 (Linux x64 binary at `bin/cf`)
 
 ## Setup and Testing Instructions
 
-To run this project locally, you will need Node.js installed on your machine, a MongoDB database, and a Google Gemini API key.
-
 ### 1. Repository Configuration
 
-Clone the repository and install the dependencies:
+Clone the repository, switch to this branch, and install dependencies:
 
 ```bash
+git checkout cftools-integration
 npm install
 ```
 
 ### 2. Environment Variables
 
-Create a file named `.env.local` in the root of the project. This file is required to connect to your database and the Gemini API.
+Create a `.env.local` file in the root of the project:
 
 ```env
 MONGODB_URI=your_mongodb_connection_string
@@ -42,40 +50,33 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 
 ### 3. Database Setup (MongoDB Atlas)
 
-To configure the MongoDB connection:
-
 1.  Create an account or log in to MongoDB Atlas.
 2.  Create a new project and deploy a free cluster.
-3.  Under "Database Access", create a new database user and securely store the password.
-4.  Under "Network Access", add your current IP address to the whitelist to allow connections.
-5.  Click "Connect", select "Drivers", and copy the provided connection string. Replace `<password>` with your database user's password.
-6.  Paste this string as the `MONGODB_URI` in your `.env.local` file.
+3.  Under "Database Access", create a database user and save the password.
+4.  Under "Network Access", add your current IP address to the whitelist.
+5.  Click "Connect", select "Drivers", and copy the connection string. Replace `<password>` with your database user's password.
+6.  Paste the string as `MONGODB_URI` in your `.env.local` file.
 
 ### 4. API Setup (Google Gemini)
 
-To configure the AI analysis:
-
-1.  Navigate to Google AI Studio.
-2.  Generate a new API key.
-3.  Paste this key as the `GEMINI_API_KEY` in your `.env.local` file.
-4.  If the key is left as `gemini-placeholder-key`, the application will default to a local stubbing mechanism for development purposes.
+1.  Navigate to Google AI Studio and generate a new API key.
+2.  Paste it as `GEMINI_API_KEY` in your `.env.local` file.
+3.  If left as `gemini-placeholder-key`, the application uses a local stub for development.
 
 ### 5. Running the Development Server
-
-Start the application:
 
 ```bash
 npm run dev
 ```
 
-Open `http://localhost:3000` in your browser. Enter any valid Codeforces handle to view the dashboard and trigger the initial synchronization pipeline.
+Open `http://localhost:3000` and enter your Codeforces handle.
 
-### 6. Installing the Browser Extension
+### 6. Connecting cf-tool
 
-To enable integrated submissions:
+Once on the dashboard, a login card will appear in the top bar. Enter your Codeforces handle and password. This authenticates the local `bin/cf` binary and stores a session at `~/.cf/session`. You will only need to do this once per machine.
 
-1.  Open Google Chrome and navigate to `chrome://extensions/`.
-2.  Enable "Developer mode" in the top right corner.
-3.  Click "Load unpacked".
-4.  Select the `extension` directory located within this project.
-5.  Ensure you are logged into Codeforces in your browser to authenticate submissions.
+After logging in, you can open any contest problem, write your solution in the editor, and click Submit. The backend will handle the rest.
+
+## Security Note
+
+This implementation requires your Codeforces password to be sent to the local Next.js backend so the `cf-tool` binary can authenticate. This is acceptable when running locally on your own machine. It is not suitable for a public multi-user deployment, where the browser extension approach on the `main` branch should be used instead.
