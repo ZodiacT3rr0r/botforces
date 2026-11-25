@@ -2,6 +2,7 @@ import mongoose, { Schema, Document, Model } from "mongoose";
 
 export interface IInsight extends Document {
   handle: string;
+  handleLower: string;
   date: Date;
   performanceReport: string;
   recommendedTopics: string[];
@@ -14,7 +15,12 @@ const InsightSchema = new Schema<IInsight>(
       type: String,
       required: [true, "Codeforces handle is required"],
       trim: true,
-      index: true,
+    },
+    handleLower: {
+      type: String,
+      required: true,
+      lowercase: true,
+      trim: true,
     },
     date: {
       type: Date,
@@ -38,8 +44,8 @@ const InsightSchema = new Schema<IInsight>(
   }
 );
 
-// Index for fetching latest insights for a user
-InsightSchema.index({ handle: 1, date: -1 });
+// ESR compound index for fetching latest insights for a user
+InsightSchema.index({ handleLower: 1, date: -1 });
 
 const Insight: Model<IInsight> =
   mongoose.models.Insight ||

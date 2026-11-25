@@ -173,6 +173,8 @@ export default function CodeEditor({
         const extensionId = localStorage.getItem("botforces_extension_id");
 
         if (extensionId) {
+          const handleParam =
+            new URLSearchParams(window.location.search).get("handle") || "";
           // @ts-expect-error - chrome.runtime only available when extension is installed
           chrome.runtime.sendMessage(
             extensionId,
@@ -181,13 +183,20 @@ export default function CodeEditor({
               data: {
                 contestId,
                 problemIndex,
+                problemName: problemName || "",
+                handle: handleParam,
+                appOrigin: window.location.origin,
                 code,
-                language: LANGUAGE_OPTIONS.find((l) => l.value === language)?.label || language,
+                language:
+                  LANGUAGE_OPTIONS.find((l) => l.value === language)?.label ||
+                  language,
               },
             },
-            (response: { success?: boolean; error?: string }) => {
+            (response: { success?: boolean; message?: string; error?: string }) => {
               if (response?.success) {
-                setSubmitStatus("✅ Submitted via extension!");
+                setSubmitStatus(
+                  `⏳ ${response.message || "Queued in extension; tracking verdict..."}`
+                );
               } else {
                 setSubmitStatus(`❌ ${response?.error || "Extension error"}`);
               }

@@ -1,10 +1,11 @@
 import * as cheerio from "cheerio";
+import { acquireThrottleSlot } from "@/lib/codeforces";
 
 /**
  * Scrape the source code of a Codeforces submission.
  *
- * Fetches the submission page and extracts the text content from
- * the <pre id="program-source-text"> element.
+ * Acquires a slot from the shared distributed Codeforces rate limiter before
+ * fetching the submission page and extracting <pre id="program-source-text">.
  *
  * @param contestId - The contest ID
  * @param submissionId - The submission ID
@@ -15,6 +16,7 @@ export async function scrapeSourceCode(
   submissionId: number
 ): Promise<string | null> {
   try {
+    await acquireThrottleSlot();
     const url = `https://codeforces.com/contest/${contestId}/submission/${submissionId}`;
 
     const response = await fetch(url, {

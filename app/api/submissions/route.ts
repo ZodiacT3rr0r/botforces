@@ -10,7 +10,10 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const handle = searchParams.get("handle");
-    const limit = parseInt(searchParams.get("limit") || "30", 10);
+    const rawLimit = Number.parseInt(searchParams.get("limit") || "30", 10);
+    const limit = Number.isNaN(rawLimit)
+      ? 30
+      : Math.min(Math.max(rawLimit, 1), 100);
 
     if (!handle) {
       return NextResponse.json(
@@ -19,9 +22,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const handleLower = handle.trim().toLowerCase();
     await connectDB();
 
-    const submissions = await Submission.find({ handle })
+    const submissions = await Submission.find({
+      $or: [{ handleLower }, { handle }],
+    })
       .sort({ creationTimeSeconds: -1 })
       .limit(limit)
       .lean();

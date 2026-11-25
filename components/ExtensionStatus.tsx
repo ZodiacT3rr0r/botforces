@@ -13,6 +13,9 @@ export default function ExtensionStatus() {
         event.data &&
         event.data.type === "BOTFORCES_EXTENSION_PONG"
       ) {
+        if (typeof event.data.extensionId === "string" && event.data.extensionId) {
+          localStorage.setItem("botforces_extension_id", event.data.extensionId);
+        }
         setConnected(true);
         setChecking(false);
       }

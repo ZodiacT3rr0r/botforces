@@ -2,6 +2,7 @@ import mongoose, { Schema, Document, Model } from "mongoose";
 
 export interface ISubmission extends Document {
   handle: string;
+  handleLower: string;
   submissionId: number;
   contestId: number;
   problemIndex: string;
@@ -23,7 +24,12 @@ const SubmissionSchema = new Schema<ISubmission>(
       type: String,
       required: [true, "Codeforces handle is required"],
       trim: true,
-      index: true,
+    },
+    handleLower: {
+      type: String,
+      required: true,
+      lowercase: true,
+      trim: true,
     },
     submissionId: {
       type: Number,
@@ -84,9 +90,9 @@ const SubmissionSchema = new Schema<ISubmission>(
   }
 );
 
-// Compound index for efficient lookups by handle + contest
-SubmissionSchema.index({ handle: 1, contestId: 1 });
-SubmissionSchema.index({ handle: 1, creationTimeSeconds: -1 });
+// Compound ESR indexes (prefix rule covers handleLower equality lookups without a redundant single-field index)
+SubmissionSchema.index({ handleLower: 1, contestId: 1 });
+SubmissionSchema.index({ handleLower: 1, creationTimeSeconds: -1 });
 
 const Submission: Model<ISubmission> =
   mongoose.models.Submission ||

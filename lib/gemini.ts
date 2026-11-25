@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
@@ -14,6 +14,7 @@ const ai = isStubbed ? null : new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 export interface AnalysisResult {
   performanceReport: string;
   recommendedTopics: string[];
+  isStub?: boolean;
 }
 
 /**
@@ -68,6 +69,17 @@ Analyze this failed submission and provide your coaching feedback as JSON.`;
       config: {
         systemInstruction: systemPrompt,
         responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            performanceReport: { type: Type.STRING },
+            recommendedTopics: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+          },
+          required: ["performanceReport", "recommendedTopics"],
+        },
       },
     });
 
@@ -76,14 +88,23 @@ Analyze this failed submission and provide your coaching feedback as JSON.`;
       throw new Error("Empty response from Gemini");
     }
 
-    const parsed = JSON.parse(content) as AnalysisResult;
+    const parsed = JSON.parse(content) as Partial<AnalysisResult>;
 
-    // Validate the response shape
-    if (!parsed.performanceReport || !Array.isArray(parsed.recommendedTopics)) {
+    // Strictly validate runtime types of every field
+    if (
+      typeof parsed.performanceReport !== "string" ||
+      !parsed.performanceReport.trim() ||
+      !Array.isArray(parsed.recommendedTopics) ||
+      !parsed.recommendedTopics.every((t) => typeof t === "string")
+    ) {
       throw new Error("Invalid response shape from Gemini");
     }
 
-    return parsed;
+    return {
+      performanceReport: parsed.performanceReport,
+      recommendedTopics: parsed.recommendedTopics,
+      isStub: false,
+    };
   } catch (error) {
     console.error("Gemini API error:", error);
     // Fall back to stub on error
@@ -188,5 +209,6 @@ Consider writing additional test cases, especially boundary cases (minimum/maxim
   return {
     performanceReport,
     recommendedTopics: [...new Set(recommended)].slice(0, 5),
+    isStub: true,
   };
 }

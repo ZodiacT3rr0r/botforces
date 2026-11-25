@@ -30,53 +30,69 @@ export default function DashboardContent() {
 
   useEffect(() => {
     if (!handle) return;
+    let cancelled = false;
 
-    const syncData = async () => {
+    const loadCached = async () => {
+      const [userRes, subsRes, insightsRes] = await Promise.all([
+        fetch(`/api/user?handle=${encodeURIComponent(handle)}`),
+        fetch(`/api/submissions?handle=${encodeURIComponent(handle)}`),
+        fetch(`/api/insights?handle=${encodeURIComponent(handle)}`),
+      ]);
+
+      if (cancelled) return;
+
+      if (userRes.ok) {
+        const userData = await userRes.json();
+        setUser(userData.user);
+      }
+
+      if (subsRes.ok) {
+        const subsData = await subsRes.json();
+        setSubmissions(subsData.submissions);
+      }
+
+      if (insightsRes.ok) {
+        const insightsData = await insightsRes.json();
+        setInsights(insightsData.insights);
+      }
+    };
+
+    const staleWhileRevalidate = async () => {
       setSyncStatus("syncing");
       setError(null);
 
       try {
-        // Trigger sync which fetches from CF API, saves to DB, and runs analysis
-        const syncRes = await fetch(`/api/cron/sync?handle=${encodeURIComponent(handle)}`);
+        // 1. Render cached MongoDB state immediately (fast path)
+        await loadCached();
+
+        // 2. Revalidate asynchronously via Codeforces + Gemini sync
+        const syncRes = await fetch(
+          `/api/cron/sync?handle=${encodeURIComponent(handle)}`
+        );
         const syncData: SyncResponse = await syncRes.json();
 
+        if (cancelled) return;
         if (!syncRes.ok || syncData.error) {
           throw new Error(syncData.error || "Sync failed");
         }
 
-        // Now fetch the data from our DB via separate API calls
-        // For now, we use the sync response and re-fetch from our API
-        // In a production app, you'd have separate read endpoints
-        const [userRes, subsRes, insightsRes] = await Promise.all([
-          fetch(`/api/user?handle=${encodeURIComponent(handle)}`),
-          fetch(`/api/submissions?handle=${encodeURIComponent(handle)}`),
-          fetch(`/api/insights?handle=${encodeURIComponent(handle)}`),
-        ]);
-
-        if (userRes.ok) {
-          const userData = await userRes.json();
-          setUser(userData.user);
+        // 3. Refresh UI with freshly synced MongoDB state
+        await loadCached();
+        if (!cancelled) {
+          setSyncStatus("done");
         }
-
-        if (subsRes.ok) {
-          const subsData = await subsRes.json();
-          setSubmissions(subsData.submissions);
-        }
-
-        if (insightsRes.ok) {
-          const insightsData = await insightsRes.json();
-          setInsights(insightsData.insights);
-        }
-
-        setSyncStatus("done");
       } catch (err) {
+        if (cancelled) return;
         console.error("Dashboard sync error:", err);
         setError(err instanceof Error ? err.message : "Unknown error");
         setSyncStatus("error");
       }
     };
 
-    syncData();
+    staleWhileRevalidate();
+    return () => {
+      cancelled = true;
+    };
   }, [handle]);
 
   if (!handle) {

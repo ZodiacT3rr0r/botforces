@@ -41,13 +41,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const trimmedHandle = String(handle).trim();
+    const handleLower = trimmedHandle.toLowerCase();
+
     await connectDB();
 
-    // Upsert the submission
+    // Upsert the submission with canonical handleLower
     const submission = await Submission.findOneAndUpdate(
       { submissionId },
       {
-        handle,
+        handle: trimmedHandle,
+        handleLower,
         submissionId,
         contestId,
         problemIndex: problemIndex || "",
@@ -59,9 +63,12 @@ export async function POST(request: NextRequest) {
         passedTestCount: body.passedTestCount || 0,
         tags: body.tags || [],
         sourceCode: body.sourceCode || "",
-        creationTimeSeconds: Math.floor(Date.now() / 1000),
+        creationTimeSeconds:
+          typeof body.creationTimeSeconds === "number" && body.creationTimeSeconds > 0
+            ? body.creationTimeSeconds
+            : Math.floor(Date.now() / 1000),
       },
-      { upsert: true, returnDocument: 'after' }
+      { upsert: true, returnDocument: "after" }
     );
 
     return NextResponse.json({

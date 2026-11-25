@@ -18,9 +18,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const handleLower = handle.trim().toLowerCase();
     await connectDB();
 
-    const user = await User.findOne({ handle }).lean();
+    const user = await User.findOne({
+      $or: [{ handleLower }, { handle }],
+    }).lean();
 
     if (!user) {
       return NextResponse.json(

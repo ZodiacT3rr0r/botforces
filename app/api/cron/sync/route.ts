@@ -11,19 +11,27 @@ import Insight from "@/models/Insight";
  * GET /api/cron/sync?handle=<handle>
  *
  * Sync pipeline:
- * 1. Fetch user info from Codeforces → upsert User document
- * 2. Fetch recent submissions → upsert Submission documents
- * 3. Filter for failed submissions (WA / TLE) not yet analyzed
- * 4. Scrape source code for each failed submission
- * 5. Run Gemini analysis on each
- * 6. Save Insight documents
+ * 1. Fetch user info from Codeforces → upsert User document with canonical handleLower
+ * 2. Fetch recent submissions → single Submission.bulkWrite upsert round-trip
+ * 3. Filter for unsolved failed submissions (WA / TLE) not yet analyzed
+ * 4. Throttled scrape of source code for up to 5 candidates
+ * 5. Run schema-validated Gemini analysis on each
+ * 6. Save Insight document (only recording non-stubbed IDs as permanently analyzed)
  */
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const handle = searchParams.get("handle");
+    const cronSecret = process.env.CRON_SECRET;
+    if (cronSecret) {
+      const authHeader = request.headers.get("authorization");
+      if (authHeader && authHeader !== `Bearer ${cronSecret}`) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+    }
 
-    if (!handle) {
+    const { searchParams } = new URL(request.url);
+    const rawHandle = searchParams.get("handle")?.trim();
+
+    if (!rawHandle) {
       return NextResponse.json(
         { error: "Missing required parameter: handle" },
         { status: 400 }
@@ -32,14 +40,17 @@ export async function GET(request: NextRequest) {
 
     await connectDB();
 
-    // ── Step 1: Fetch and upsert user info ──────────────────────────────
+    // ── Step 1: Fetch and upsert user info with canonical casing ────────
 
-    const cfUser = await getUserInfo(handle);
+    const cfUser = await getUserInfo(rawHandle);
+    const canonicalHandle = cfUser.handle;
+    const handleLower = canonicalHandle.toLowerCase();
 
     await User.findOneAndUpdate(
-      { handle: cfUser.handle },
+      { handleLower },
       {
-        handle: cfUser.handle,
+        handle: canonicalHandle,
+        handleLower,
         rating: cfUser.rating,
         rank: cfUser.rank,
         maxRating: cfUser.maxRating,
@@ -53,52 +64,63 @@ export async function GET(request: NextRequest) {
         registrationTimeSeconds: cfUser.registrationTimeSeconds,
         lastOnlineTimeSeconds: cfUser.lastOnlineTimeSeconds,
       },
-      { upsert: true, returnDocument: 'after' }
+      { upsert: true, returnDocument: "after" }
     );
 
-    // ── Step 2: Fetch recent submissions ────────────────────────────────
+    // ── Step 2: Fetch recent submissions & bulkWrite upsert ─────────────
 
-    const cfSubmissions = await getUserSubmissions(handle, 1, 30);
+    const cfSubmissions = await getUserSubmissions(canonicalHandle, 1, 30);
 
-    const upsertedSubmissions = [];
-    for (const sub of cfSubmissions) {
-      const doc = await Submission.findOneAndUpdate(
-        { submissionId: sub.id },
-        {
-          handle: handle,
-          submissionId: sub.id,
-          contestId: sub.contestId || 0,
-          problemIndex: sub.problem.index,
-          problemName: sub.problem.name,
-          problemRating: sub.problem.rating || 0,
-          verdict: sub.verdict || "TESTING",
-          programmingLanguage: sub.programmingLanguage,
-          timeConsumedMillis: sub.timeConsumedMillis,
-          memoryConsumedBytes: sub.memoryConsumedBytes,
-          passedTestCount: sub.passedTestCount,
-          tags: sub.problem.tags,
-          creationTimeSeconds: sub.creationTimeSeconds,
-        },
-        { upsert: true, returnDocument: 'after' }
+    if (cfSubmissions.length > 0) {
+      await Submission.bulkWrite(
+        cfSubmissions.map((sub) => ({
+          updateOne: {
+            filter: { submissionId: sub.id },
+            update: {
+              $set: {
+                handle: canonicalHandle,
+                handleLower,
+                submissionId: sub.id,
+                contestId: sub.contestId || 0,
+                problemIndex: sub.problem.index,
+                problemName: sub.problem.name,
+                problemRating: sub.problem.rating || 0,
+                verdict: sub.verdict || "TESTING",
+                programmingLanguage: sub.programmingLanguage,
+                timeConsumedMillis: sub.timeConsumedMillis,
+                memoryConsumedBytes: sub.memoryConsumedBytes,
+                passedTestCount: sub.passedTestCount,
+                tags: sub.problem.tags,
+                creationTimeSeconds: sub.creationTimeSeconds,
+              },
+            },
+            upsert: true,
+          },
+        })),
+        { ordered: false }
       );
-      upsertedSubmissions.push(doc);
     }
 
-    // ── Step 3: Filter failed submissions not yet analyzed ──────────────
+    const syncedIds = cfSubmissions.map((s) => s.id);
+    const upsertedSubmissions = await Submission.find({
+      submissionId: { $in: syncedIds },
+    })
+      .sort({ creationTimeSeconds: -1 })
+      .lean();
+
+    // ── Step 3: Filter unsolved failed submissions not yet analyzed ─────
 
     const failedVerdicts = ["WRONG_ANSWER", "TIME_LIMIT_EXCEEDED"];
 
-    // Get all submission IDs that have already been analyzed
-    const existingInsights = await Insight.find({ handle }).select(
-      "analyzedSubmissionIds"
-    );
+    const [existingInsights, solvedSubmissions] = await Promise.all([
+      Insight.find({ handleLower }).select("analyzedSubmissionIds").lean(),
+      Submission.find({ handleLower, verdict: "OK" })
+        .select("contestId problemIndex")
+        .lean(),
+    ]);
+
     const analyzedIds = new Set(
       existingInsights.flatMap((i) => i.analyzedSubmissionIds)
-    );
-
-    // Get all solved problems to avoid analyzing failed submissions for problems the user eventually solved
-    const solvedSubmissions = await Submission.find({ handle, verdict: "OK" }).select(
-      "contestId problemIndex"
     );
     const solvedSet = new Set(
       solvedSubmissions.map((s) => `${s.contestId}-${s.problemIndex}`)
@@ -112,28 +134,26 @@ export async function GET(request: NextRequest) {
         sub.contestId > 0
     );
 
-    // ── Step 4 & 5: Scrape code and analyze (limit to 5 to avoid rate limits) ─
+    // ── Step 4 & 5: Throttled scrape and Gemini analysis (cap 5) ────────
 
     const submissionsToAnalyze = failedSubmissions.slice(0, 5);
     const analysisResults = [];
 
     for (const sub of submissionsToAnalyze) {
-      // Scrape source code if we don't already have it
-      let sourceCode: string | null = sub.sourceCode;
+      let sourceCode: string | null = sub.sourceCode || null;
       if (!sourceCode) {
         sourceCode = await scrapeSourceCode(sub.contestId, sub.submissionId);
         if (sourceCode) {
-          await Submission.findOneAndUpdate(
+          await Submission.updateOne(
             { submissionId: sub.submissionId },
-            { sourceCode },
-            { returnDocument: 'after' }
+            { $set: { sourceCode } }
           );
         }
       }
 
-      // Run Gemini analysis (even if source code is missing, we can provide general feedback)
       const analysis = await analyzeFailedSubmission(
-        sourceCode || "// Source code could not be scraped due to Codeforces Cloudflare protection.",
+        sourceCode ||
+          "// Source code could not be scraped due to Codeforces Cloudflare protection.",
         sub.tags,
         sub.verdict,
         sub.problemName
@@ -147,12 +167,13 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // ── Step 6: Save insights ───────────────────────────────────────────
+    // ── Step 6: Save insight (only permanently mark non-stub analyses) ──
 
     if (analysisResults.length > 0) {
-      // Aggregate all recommendations into a single insight
       const allTopics = [
-        ...new Set(analysisResults.flatMap((r) => r.analysis.recommendedTopics)),
+        ...new Set(
+          analysisResults.flatMap((r) => r.analysis.recommendedTopics)
+        ),
       ];
 
       const combinedReport = analysisResults
@@ -162,25 +183,31 @@ export async function GET(request: NextRequest) {
         )
         .join("\n\n---\n\n");
 
-      const analyzedIds = analysisResults.map((r) => r.submissionId);
+      const permanentlyAnalyzedIds = analysisResults
+        .filter((r) => !r.analysis.isStub)
+        .map((r) => r.submissionId);
 
       await Insight.create({
-        handle,
+        handle: canonicalHandle,
+        handleLower,
         date: new Date(),
         performanceReport: combinedReport,
         recommendedTopics: allTopics.slice(0, 10),
-        analyzedSubmissionIds: analyzedIds,
+        analyzedSubmissionIds: permanentlyAnalyzedIds,
       });
     }
 
     return NextResponse.json({
       success: true,
-      handle,
+      handle: canonicalHandle,
       userSynced: true,
       submissionsSynced: upsertedSubmissions.length,
       failedFound: failedSubmissions.length,
       analyzed: analysisResults.length,
-      insights: analysisResults.length > 0 ? "New insight generated" : "No new failed submissions to analyze",
+      insights:
+        analysisResults.length > 0
+          ? "New insight generated"
+          : "No new failed submissions to analyze",
     });
   } catch (error) {
     console.error("Sync error:", error);

@@ -11,7 +11,6 @@ const RateLimitSchema = new Schema<IRateLimit>(
       type: String,
       required: true,
       unique: true,
-      index: true,
     },
     nextAllowedAt: {
       type: Number,

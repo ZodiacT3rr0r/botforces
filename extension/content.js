@@ -1,32 +1,49 @@
 /**
- * BotForces Extension — Content Script
+ * BotForces Extension — Content Script (Isolated World)
  *
- * Injected into codeforces.com pages. Handles:
- * 1. Responding to PING messages from the web app (via window.postMessage)
- * 2. Filling and submitting solutions on the submission page
- * 3. Watching for verdict results and reporting back
+ * Injected into BotForces web app origins (localhost:3000 & *.vercel.app)
+ * and codeforces.com pages. Handles:
+ * 1. Auto-advertising chrome.runtime.id in BOTFORCES_EXTENSION_PONG so the
+ *    web app never needs manual extension ID setup
+ * 2. Filling & submitting the Codeforces form (DOM textarea + toggle fallback)
+ * 3. Reading a single-pass verdict snapshot from /my or /status after redirect
+ *    (polling/reloading is orchestrated safely in background.js via chrome.alarms)
  */
 
-// ─── Window Message Listener (for web app communication fallback) ────────
+// ─── Web App Handshake (auto-populates botforces_extension_id) ──────────
 
 window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
   if (event.data && event.data.type === "BOTFORCES_EXTENSION_PING") {
-    window.postMessage({ type: "BOTFORCES_EXTENSION_PONG" }, "*");
+    window.postMessage(
+      {
+        type: "BOTFORCES_EXTENSION_PONG",
+        extensionId: chrome.runtime.id,
+      },
+      window.location.origin
+    );
+    chrome.runtime.sendMessage({
+      type: "REGISTER_APP_ORIGIN",
+      origin: window.location.origin,
+    });
   }
 });
 
 // ─── Chrome Runtime Message Listener ────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log("[BotForces CS] Received:", message.type);
-
   if (message.type === "FILL_AND_SUBMIT") {
     fillAndSubmit(message.data)
       .then((result) => sendResponse(result))
       .catch((error) =>
         sendResponse({ error: error.message || "Submission failed" })
       );
-    return true; // async response
+    return true;
+  }
+
+  if (message.type === "READ_VERDICT") {
+    sendResponse(readVerdictSnapshot(message.data));
+    return false;
   }
 });
 
@@ -49,19 +66,20 @@ const LANGUAGE_MAP = {
 // ─── Submit Logic ───────────────────────────────────────────────────────
 
 async function fillAndSubmit(data) {
-  const { code, language, contestId, problemIndex } = data;
+  const { code, language, problemIndex } = data;
 
-  // Wait for the page to fully load
   await waitForElement("#sourceCodeTextarea, .submit-form");
 
-  // 1. Select the problem (if the dropdown exists)
-  const problemSelect = document.querySelector('select[name="submittedProblemIndex"]');
+  // 1. Select the problem (if dropdown exists)
+  const problemSelect = document.querySelector(
+    'select[name="submittedProblemIndex"]'
+  );
   if (problemSelect) {
     const options = Array.from(problemSelect.options);
     const targetOption = options.find(
       (opt) =>
         opt.value === problemIndex ||
-        opt.text.startsWith(problemIndex + ".")  ||
+        opt.text.startsWith(problemIndex + ".") ||
         opt.text.startsWith(problemIndex + " ")
     );
     if (targetOption) {
@@ -70,12 +88,11 @@ async function fillAndSubmit(data) {
     }
   }
 
-  // 2. Select the language
+  // 2. Select the compiler/language
   const langSelect = document.querySelector('select[name="programTypeId"]');
   if (langSelect) {
     const options = Array.from(langSelect.options);
     const mappedLang = LANGUAGE_MAP[language] || language;
-
     const targetOption = options.find(
       (opt) =>
         opt.text.includes(mappedLang) ||
@@ -87,8 +104,13 @@ async function fillAndSubmit(data) {
     }
   }
 
-  // 3. Fill in the source code
-  // Codeforces uses a CodeMirror editor or a textarea
+  // 3. Fill plain #sourceCodeTextarea (page-world Ace/CodeMirror is handled
+  //    by background.js via chrome.scripting.executeScript({ world: "MAIN" }))
+  const toggleEditorCheckbox = document.querySelector("#toggleEditorCheckbox");
+  if (toggleEditorCheckbox && !toggleEditorCheckbox.checked) {
+    toggleEditorCheckbox.click();
+  }
+
   const textarea = document.querySelector("#sourceCodeTextarea");
   if (textarea) {
     textarea.value = code;
@@ -96,95 +118,68 @@ async function fillAndSubmit(data) {
     textarea.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  // Also try to set the CodeMirror editor if it exists
-  const cmEditor = document.querySelector(".CodeMirror");
-  if (cmEditor && cmEditor.CodeMirror) {
-    cmEditor.CodeMirror.setValue(code);
-  }
+  // 4. Click submit (background.js takes over after the 302 redirect to /my)
+  await new Promise((resolve) => setTimeout(resolve, 350));
 
-  // 4. Submit the form
-  await new Promise((resolve) => setTimeout(resolve, 500)); // Brief delay
-
-  const submitButton = document.querySelector('.submit-form input[type="submit"], .submit-form button[type="submit"], #singlePageSubmitButton');
-  if (submitButton) {
-    submitButton.click();
-
-    // 5. Watch for the result
-    await watchForVerdict(contestId, problemIndex);
-  } else {
+  const submitButton = document.querySelector(
+    '.submit-form input[type="submit"], .submit-form button[type="submit"], #singlePageSubmitButton'
+  );
+  if (!submitButton) {
     throw new Error("Could not find submit button");
   }
 
+  submitButton.click();
   return { success: true };
 }
 
 /**
- * Watch the page for the submission verdict.
- * After form submission, CF redirects to the status page.
+ * Reads the top submission row on /my or /status without blocking loops or reloads.
  */
-async function watchForVerdict(contestId, problemIndex) {
-  // Wait for page navigation (CF redirects after submit)
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-
-  // Check if we're on a status/my page now
-  const currentUrl = window.location.href;
-  if (currentUrl.includes("/my") || currentUrl.includes("/status")) {
-    // Look for the verdict in the submission table
-    const checkVerdict = () => {
-      const rows = document.querySelectorAll("table.status-frame-datatable tr");
-      if (rows.length > 1) {
-        const firstDataRow = rows[1]; // Skip header
-        const verdictCell = firstDataRow.querySelector(".status-verdict-cell, td:nth-child(6)");
-        const submissionIdCell = firstDataRow.querySelector("td:first-child a");
-
-        if (verdictCell) {
-          const verdictText = verdictCell.textContent.trim();
-          const submissionId = submissionIdCell
-            ? parseInt(submissionIdCell.textContent.trim())
-            : 0;
-
-          // Check if verdict is final (not "Testing" or "In queue")
-          if (
-            verdictText &&
-            !verdictText.includes("queue") &&
-            !verdictText.includes("Running") &&
-            !verdictText.includes("Testing")
-          ) {
-            // Send result back to background
-            chrome.runtime.sendMessage({
-              type: "SUBMISSION_RESULT",
-              data: {
-                contestId,
-                problemIndex,
-                submissionId,
-                verdict: parseVerdict(verdictText),
-                verdictText,
-              },
-            });
-            return true;
-          }
-        }
-      }
-      return false;
-    };
-
-    // Poll for verdict (CF updates the page)
-    for (let i = 0; i < 30; i++) {
-      if (checkVerdict()) return;
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      // Refresh to check for updates
-      if (i > 0 && i % 5 === 0) {
-        window.location.reload();
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-    }
+function readVerdictSnapshot(data) {
+  const { contestId, problemIndex } = data || {};
+  const rows = document.querySelectorAll("table.status-frame-datatable tr");
+  if (rows.length <= 1) {
+    return { final: false };
   }
+
+  const firstDataRow = rows[1];
+  const verdictCell = firstDataRow.querySelector(
+    ".status-verdict-cell, td:nth-child(6)"
+  );
+  const submissionIdCell = firstDataRow.querySelector("td:first-child a");
+  const handleLink = firstDataRow.querySelector("td:nth-child(3) a");
+
+  if (!verdictCell) {
+    return { final: false };
+  }
+
+  const verdictText = verdictCell.textContent.trim();
+  const submissionId = submissionIdCell
+    ? Number.parseInt(submissionIdCell.textContent.trim(), 10)
+    : 0;
+  const handle = handleLink ? handleLink.textContent.trim() : "";
+
+  const isPending =
+    !verdictText ||
+    verdictText.includes("queue") ||
+    verdictText.includes("Running") ||
+    verdictText.includes("Testing");
+
+  if (isPending) {
+    return { final: false, verdictText, submissionId };
+  }
+
+  return {
+    final: true,
+    handle,
+    contestId,
+    problemIndex,
+    submissionId,
+    verdict: parseVerdict(verdictText),
+    verdictText,
+  };
 }
 
-/**
- * Parse a CF verdict string into our standard verdict enum.
- */
 function parseVerdict(text) {
   const lower = text.toLowerCase();
   if (lower.includes("accepted")) return "OK";
@@ -197,11 +192,8 @@ function parseVerdict(text) {
   return "UNKNOWN";
 }
 
-/**
- * Wait for an element to appear on the page.
- */
 function waitForElement(selector, timeout = 10000) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const element = document.querySelector(selector);
     if (element) {
       resolve(element);
@@ -223,7 +215,6 @@ function waitForElement(selector, timeout = 10000) {
 
     setTimeout(() => {
       observer.disconnect();
-      // Resolve anyway — the page might already be loaded
       resolve(document.querySelector(selector));
     }, timeout);
   });

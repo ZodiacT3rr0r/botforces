@@ -177,17 +177,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Reserves a globally coordinated execution timestamp via MongoDB atomic
- * aggregation update so serverless cold starts and concurrent instances
- * never exceed Codeforces's 1-req/2s limit. Falls back to in-process
- * serialized scheduling if MongoDB is unavailable.
+ * Reserves a globally coordinated execution wait duration via MongoDB atomic
+ * aggregation update using MongoDB's server-side `$$NOW` clock so serverless
+ * cold starts, clock skew, and concurrent instances never exceed Codeforces's
+ * 1-req/2s limit. Falls back to in-process serialized scheduling if MongoDB
+ * is unavailable.
  */
-async function reserveDistributedSlot(minSpacingMs: number): Promise<number> {
+async function reserveDistributedWaitMs(minSpacingMs: number): Promise<number> {
   if (!process.env.MONGODB_URI) {
     const now = Date.now();
     const slot = Math.max(localNextAllowedAt, now);
     localNextAllowedAt = slot + minSpacingMs;
-    return slot;
+    return Math.max(0, slot - now);
   }
 
   try {
@@ -197,15 +198,21 @@ async function reserveDistributedSlot(minSpacingMs: number): Promise<number> {
     ]);
     await connectDB();
 
-    const now = Date.now();
+    const serverNowExpr = { $toLong: "$$NOW" };
     const updated = await RateLimit.findOneAndUpdate(
       { key: RATE_LIMIT_KEY },
       [
         {
           $set: {
+            lastServerNow: serverNowExpr,
             nextAllowedAt: {
               $add: [
-                { $max: [{ $ifNull: ["$nextAllowedAt", now] }, now] },
+                {
+                  $max: [
+                    { $ifNull: ["$nextAllowedAt", serverNowExpr] },
+                    serverNowExpr,
+                  ],
+                },
                 minSpacingMs,
               ],
             },
@@ -213,12 +220,20 @@ async function reserveDistributedSlot(minSpacingMs: number): Promise<number> {
         },
       ],
       { upsert: true, new: true }
-    ).lean();
+    ).lean<{ nextAllowedAt?: number; lastServerNow?: number }>();
 
     if (updated && typeof updated.nextAllowedAt === "number") {
+      const serverNow =
+        typeof updated.lastServerNow === "number"
+          ? updated.lastServerNow
+          : Date.now();
       const reservedSlot = updated.nextAllowedAt - minSpacingMs;
-      localNextAllowedAt = Math.max(localNextAllowedAt, updated.nextAllowedAt);
-      return reservedSlot;
+      const waitMs = Math.max(0, reservedSlot - serverNow);
+      localNextAllowedAt = Math.max(
+        localNextAllowedAt,
+        Date.now() + waitMs + minSpacingMs
+      );
+      return waitMs;
     }
   } catch {
     // Graceful fallback to local in-memory throttle if DB is temporarily unreachable
@@ -227,12 +242,12 @@ async function reserveDistributedSlot(minSpacingMs: number): Promise<number> {
   const now = Date.now();
   const slot = Math.max(localNextAllowedAt, now);
   localNextAllowedAt = slot + minSpacingMs;
-  return slot;
+  return Math.max(0, slot - now);
 }
 
 /**
- * Pushes the distributed & local cooldown window forward when a 429 or
- * "Call limit exceeded" response is encountered.
+ * Pushes the distributed & local cooldown window forward using MongoDB's `$$NOW`
+ * clock when a 429 or "Call limit exceeded" response is encountered.
  */
 async function applyBackoffPenalty(backoffMs: number): Promise<void> {
   const penaltyUntil = Date.now() + backoffMs;
@@ -245,13 +260,14 @@ async function applyBackoffPenalty(backoffMs: number): Promise<void> {
       import("../models/RateLimit"),
     ]);
     await connectDB();
+    const serverPenaltyExpr = { $add: [{ $toLong: "$$NOW" }, backoffMs] };
     await RateLimit.findOneAndUpdate(
       { key: RATE_LIMIT_KEY },
       [
         {
           $set: {
             nextAllowedAt: {
-              $max: [{ $ifNull: ["$nextAllowedAt", 0] }, penaltyUntil],
+              $max: [{ $ifNull: ["$nextAllowedAt", 0] }, serverPenaltyExpr],
             },
           },
         },
@@ -284,7 +300,7 @@ function isTransientStatus(status: number): boolean {
   return status === 429 || status === 502 || status === 503 || status === 504;
 }
 
-async function acquireThrottleSlot(): Promise<void> {
+export async function acquireThrottleSlot(): Promise<void> {
   const prev = localQueue;
   let release!: () => void;
   localQueue = new Promise<void>((resolve) => {
@@ -293,8 +309,7 @@ async function acquireThrottleSlot(): Promise<void> {
 
   await prev;
   try {
-    const targetTime = await reserveDistributedSlot(MIN_INTERVAL_MS);
-    const waitMs = targetTime - Date.now();
+    const waitMs = await reserveDistributedWaitMs(MIN_INTERVAL_MS);
     if (waitMs > 0) {
       await sleep(waitMs);
     }

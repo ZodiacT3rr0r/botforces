@@ -2,6 +2,7 @@ import mongoose, { Schema, Document, Model } from "mongoose";
 
 export interface IUser extends Document {
   handle: string;
+  handleLower: string;
   rating: number;
   rank: string;
   maxRating: number;
@@ -23,7 +24,13 @@ const UserSchema = new Schema<IUser>(
       required: [true, "Codeforces handle is required"],
       unique: true,
       trim: true,
-      index: true,
+    },
+    handleLower: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
     },
     rating: {
       type: Number,
