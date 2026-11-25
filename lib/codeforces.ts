@@ -1,8 +1,9 @@
 /**
  * Codeforces API Client
  *
- * Rate limited to 1 request per 2 seconds per CF API rules.
- * All methods return typed responses matching CF API return objects.
+ * Resilient distributed + in-process rate limiter (1 request per 2.1s)
+ * with MongoDB-backed atomic slot reservation across serverless cold starts
+ * and exponential backoff + jitter on HTTP 429 / transient failures.
  */
 
 // ─── Type Definitions ────────────────────────────────────────────────────────
@@ -160,22 +161,150 @@ interface CFAPIResponse<T> {
   result?: T;
 }
 
-// ─── Rate Limiter ────────────────────────────────────────────────────────────
+// ─── Distributed + In-Process Rate Limiter & Resilient Retry ─────────────────
 
-let lastRequestTime = 0;
+const MIN_INTERVAL_MS = 2100; // 2.1s buffer over Codeforces's 1 req / 2s limit
+const MAX_RETRIES = 3;
+const BASE_BACKOFF_MS = 2500;
+const RATE_LIMIT_KEY = "codeforces_api";
 
-async function rateLimitedFetch(url: string): Promise<Response> {
-  const now = Date.now();
-  const timeSinceLastRequest = now - lastRequestTime;
-  const minInterval = 2100; // 2.1 seconds (slight buffer over CF's 2-second rule)
+let localNextAllowedAt = 0;
+let localQueue: Promise<void> = Promise.resolve();
 
-  if (timeSinceLastRequest < minInterval) {
-    await new Promise((resolve) =>
-      setTimeout(resolve, minInterval - timeSinceLastRequest)
-    );
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Reserves a globally coordinated execution timestamp via MongoDB atomic
+ * aggregation update so serverless cold starts and concurrent instances
+ * never exceed Codeforces's 1-req/2s limit. Falls back to in-process
+ * serialized scheduling if MongoDB is unavailable.
+ */
+async function reserveDistributedSlot(minSpacingMs: number): Promise<number> {
+  if (!process.env.MONGODB_URI) {
+    const now = Date.now();
+    const slot = Math.max(localNextAllowedAt, now);
+    localNextAllowedAt = slot + minSpacingMs;
+    return slot;
   }
 
-  lastRequestTime = Date.now();
+  try {
+    const [{ default: connectDB }, { default: RateLimit }] = await Promise.all([
+      import("./mongodb"),
+      import("../models/RateLimit"),
+    ]);
+    await connectDB();
+
+    const now = Date.now();
+    const updated = await RateLimit.findOneAndUpdate(
+      { key: RATE_LIMIT_KEY },
+      [
+        {
+          $set: {
+            nextAllowedAt: {
+              $add: [
+                { $max: [{ $ifNull: ["$nextAllowedAt", now] }, now] },
+                minSpacingMs,
+              ],
+            },
+          },
+        },
+      ],
+      { upsert: true, new: true }
+    ).lean();
+
+    if (updated && typeof updated.nextAllowedAt === "number") {
+      const reservedSlot = updated.nextAllowedAt - minSpacingMs;
+      localNextAllowedAt = Math.max(localNextAllowedAt, updated.nextAllowedAt);
+      return reservedSlot;
+    }
+  } catch {
+    // Graceful fallback to local in-memory throttle if DB is temporarily unreachable
+  }
+
+  const now = Date.now();
+  const slot = Math.max(localNextAllowedAt, now);
+  localNextAllowedAt = slot + minSpacingMs;
+  return slot;
+}
+
+/**
+ * Pushes the distributed & local cooldown window forward when a 429 or
+ * "Call limit exceeded" response is encountered.
+ */
+async function applyBackoffPenalty(backoffMs: number): Promise<void> {
+  const penaltyUntil = Date.now() + backoffMs;
+  localNextAllowedAt = Math.max(localNextAllowedAt, penaltyUntil);
+
+  if (!process.env.MONGODB_URI) return;
+  try {
+    const [{ default: connectDB }, { default: RateLimit }] = await Promise.all([
+      import("./mongodb"),
+      import("../models/RateLimit"),
+    ]);
+    await connectDB();
+    await RateLimit.findOneAndUpdate(
+      { key: RATE_LIMIT_KEY },
+      [
+        {
+          $set: {
+            nextAllowedAt: {
+              $max: [{ $ifNull: ["$nextAllowedAt", 0] }, penaltyUntil],
+            },
+          },
+        },
+      ],
+      { upsert: true }
+    );
+  } catch {
+    // Ignore persistence error during backoff update
+  }
+}
+
+function parseRetryAfterMs(headerVal: string | null, attempt: number): number {
+  if (headerVal) {
+    const seconds = Number(headerVal);
+    if (!Number.isNaN(seconds) && seconds > 0) {
+      return seconds * 1000;
+    }
+    const parsedDate = Date.parse(headerVal);
+    if (!Number.isNaN(parsedDate)) {
+      const delta = parsedDate - Date.now();
+      if (delta > 0) return delta;
+    }
+  }
+  const exp = BASE_BACKOFF_MS * Math.pow(2, attempt);
+  const jitter = Math.floor(Math.random() * 600);
+  return exp + jitter;
+}
+
+function isTransientStatus(status: number): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+async function acquireThrottleSlot(): Promise<void> {
+  const prev = localQueue;
+  let release!: () => void;
+  localQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await prev;
+  try {
+    const targetTime = await reserveDistributedSlot(MIN_INTERVAL_MS);
+    const waitMs = targetTime - Date.now();
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+  } finally {
+    release();
+  }
+}
+
+async function rateLimitedFetch(url: string): Promise<Response> {
+  await acquireThrottleSlot();
   return fetch(url);
 }
 
@@ -191,23 +320,66 @@ async function cfApiCall<T>(
   const queryString = queryParams.toString();
   const url = `https://codeforces.com/api/${method}${queryString ? `?${queryString}` : ""}`;
 
-  const response = await rateLimitedFetch(url);
+  let lastError: Error | null = null;
 
-  if (!response.ok) {
-    throw new Error(`CF API HTTP error: ${response.status} ${response.statusText}`);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let response: Response;
+    try {
+      response = await rateLimitedFetch(url);
+    } catch (networkErr) {
+      lastError =
+        networkErr instanceof Error
+          ? networkErr
+          : new Error(String(networkErr));
+      if (attempt < MAX_RETRIES) {
+        const delayMs = parseRetryAfterMs(null, attempt);
+        await applyBackoffPenalty(delayMs);
+        await sleep(delayMs);
+        continue;
+      }
+      throw lastError;
+    }
+
+    if (!response.ok) {
+      if (isTransientStatus(response.status) && attempt < MAX_RETRIES) {
+        const delayMs = parseRetryAfterMs(
+          response.headers.get("retry-after"),
+          attempt
+        );
+        await applyBackoffPenalty(delayMs);
+        await sleep(delayMs);
+        continue;
+      }
+      throw new Error(
+        `CF API HTTP error: ${response.status} ${response.statusText}`
+      );
+    }
+
+    const data: CFAPIResponse<T> = await response.json();
+
+    if (data.status === "FAILED") {
+      const comment = data.comment || "Unknown error";
+      // Codeforces sometimes returns HTTP 200 with comment "Call limit exceeded"
+      if (
+        comment.toLowerCase().includes("call limit exceeded") &&
+        attempt < MAX_RETRIES
+      ) {
+        const delayMs = parseRetryAfterMs(null, attempt);
+        await applyBackoffPenalty(delayMs);
+        await sleep(delayMs);
+        continue;
+      }
+      throw new Error(`CF API error: ${comment}`);
+    }
+
+    if (data.result === undefined) {
+      throw new Error("CF API returned OK but no result");
+    }
+
+    return data.result;
   }
 
-  const data: CFAPIResponse<T> = await response.json();
-
-  if (data.status === "FAILED") {
-    throw new Error(`CF API error: ${data.comment || "Unknown error"}`);
-  }
-
-  if (data.result === undefined) {
-    throw new Error("CF API returned OK but no result");
-  }
-
-  return data.result;
+  throw lastError ?? new Error("CF API request exhausted retries");
 }
 
 // ─── API Methods ─────────────────────────────────────────────────────────────
